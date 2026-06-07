@@ -33,6 +33,12 @@ Run the main demo:
 .venv/bin/python demo.py
 ```
 
+By default, `demo.py` reuses the existing `movies:` and `users:` data when the Redis indexes are healthy. Rebuild the 5,000 movie demo dataset only when needed:
+
+```bash
+.venv/bin/python demo.py --reseed
+```
+
 Run a focused recommendation for Maya:
 
 ```bash

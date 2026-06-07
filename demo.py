@@ -261,6 +261,10 @@ def pack_vector(vector: list[float]) -> bytes:
     return struct.pack(f"<{len(vector)}f", *vector)
 
 
+def unpack_vector(vector: bytes) -> list[float]:
+    return list(struct.unpack(f"<{DIMENSIONS}f", vector))
+
+
 def decode(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8")
@@ -394,6 +398,20 @@ def wait_for_index(client: redis.Redis, index_name: str, expected_docs: int, tim
     raise TimeoutError(f"{index_name} did not finish indexing {expected_docs} docs within {timeout_seconds:.1f}s")
 
 
+def index_ready(client: redis.Redis, index_name: str, expected_docs: int) -> bool:
+    try:
+        info = client.execute_command("FT.INFO", index_name)
+    except ResponseError as exc:
+        if "not found" in str(exc).lower():
+            return False
+        raise
+
+    num_docs = int(index_value(info, b"num_docs") or 0)
+    indexing = int(index_value(info, b"indexing") or 0)
+    failures = int(index_value(info, b"hash_indexing_failures") or 0)
+    return num_docs >= expected_docs and indexing == 0 and failures == 0
+
+
 def create_movie_index(client: redis.Redis, index_name: str, vector_algorithm: str, vector_attrs: list[str]) -> None:
     client.execute_command(
         "FT.CREATE",
@@ -519,6 +537,39 @@ def seed(client: redis.Redis) -> tuple[list[Movie], list[User]]:
     wait_for_index(client, USER_INDEX, len(users))
 
     return movies, users
+
+
+def load_users(client: redis.Redis) -> list[User]:
+    users = []
+    for key, name, _genres, preferences in USER_PERSONAS:
+        data = client.hgetall(key)
+        if not data or b"embedding" not in data:
+            raise RuntimeError(f"Missing existing user vector at {key}; run with --reseed to rebuild the demo dataset")
+
+        users.append(
+            User(
+                key=key,
+                user_id=decode(data.get(b"userId", key.split(":", 1)[1])),
+                name=decode(data.get(b"name", name)),
+                watch_history=decode(data.get(b"watchHistory", b"")).split(","),
+                preferences=decode(data.get(b"preferences", preferences)),
+                embedding=unpack_vector(data[b"embedding"]),
+            )
+        )
+    return users
+
+
+def ensure_dataset(client: redis.Redis, reseed: bool) -> list[User]:
+    if reseed or not (
+        index_ready(client, MOVIE_INDEX, MOVIE_COUNT)
+        and index_ready(client, USER_INDEX, USER_COUNT)
+        and client.exists(f"{MOVIE_PREFIX}001")
+        and client.exists(f"{USER_PREFIX}001")
+    ):
+        _, users = seed(client)
+        return users
+
+    return load_users(client)
 
 
 def recommendation_expression(revenue_weight: float, rating_weight: float) -> tuple[str, str, str]:
@@ -695,6 +746,7 @@ def main() -> None:
     parser.add_argument("--candidate-pool", type=int, default=MOVIE_COUNT)
     parser.add_argument("--revenue-weight", type=float, default=0.25)
     parser.add_argument("--rating-weight", type=float, default=0.10)
+    parser.add_argument("--reseed", action="store_true", help="Rebuild the movies:/users: demo dataset and indexes before querying.")
     parser.add_argument("--user", help="Optional user key/id/name to show one recommendation set, e.g. users:001 or Maya.")
     args = parser.parse_args()
 
@@ -708,7 +760,7 @@ def main() -> None:
         raise SystemExit("--revenue-weight + --rating-weight must be less than 1.0")
     client = redis.Redis(host=args.host, port=args.port, decode_responses=False)
     client.ping()
-    _, users = seed(client)
+    users = ensure_dataset(client, args.reseed)
     print_command_pattern(args.candidate_pool, args.top_k, args.revenue_weight, args.rating_weight)
     print_recommendations(
         client,
