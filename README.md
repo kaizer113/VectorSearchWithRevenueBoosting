@@ -57,7 +57,7 @@ The demo seeds:
 The recommendation query passes the selected user's binary vector into Redis and asks Redis to compute the boosted ranking:
 
 ```text
-FT.AGGREGATE idx:movies "*=>[KNN 5000 @embedding $user_vector AS vector_distance]"
+FT.AGGREGATE idx:movies "*=>[KNN 25 @embedding $user_vector AS vector_distance]"
   PARAMS 2 user_vector <binary FLOAT32 user vector>
   LOAD 7 @movieId @title @genre @description @revenue @score @vector_distance
   APPLY "(1/(1+@vector_distance))" AS semantic_score
